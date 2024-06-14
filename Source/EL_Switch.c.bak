@@ -1,0 +1,1167 @@
+/************************************************************************************
+	Project		: 전자식스위치
+	File Name	: EL_Switch.C
+	Target		: EL_Switch
+	Revision	: Rev 1.0
+	Compiler	: ST Visual Develop(COSMIC)
+	Date		: 2020/07/10
+	Designed by	: J.S Yoon
+	Modify		:
+	Section		: NEO INFORMATION SYSTEMS CO.,LTD. R&D
+************************************************************************************/
+
+#include "header.h"
+#include "eeprom.h"
+#include "touch.h"
+#include "el_switch.h"
+#include "led.h"
+#include "lcd.h"
+#include "WDGnBeep.h"
+#include "dimming.h"
+#include "Relay.h"
+#include "Debug.h"
+#include "STPM3x_opt.h"
+#include "rs-485.h"
+
+#define		ELECTRICITY_DELAY_TIME		50		// 5sec
+#define		LIGHT_DELAY_TIME			50		// 5sec
+
+uint8_t				Gu8_PowerSaving_Tmr;
+
+EVNET_BUF			Relay_CtrlBuff, PWM_CtrlBuff;
+
+uint8_t				Gu8_SWITCH_Delay_Flag[mapping_ITEM_MAX];
+uint8_t				Gu8_SWITCH_Delay_OFF_Tmr[mapping_ITEM_MAX];
+uint8_t				Gu8_Special_Function_Key		= 0;
+uint8_t				Gu8_Special_Function_Key_Tmr	= 0;
+//-------------------------------------------------------------------------------------------------------------------------
+
+void EL_Switch_Init(void)
+{
+	uint8_t	i;
+	
+	Gu8_PowerSaving_Tmr			= POWER_SAVING_TMR;	// 5sec
+	
+	memset((void*)&Relay_CtrlBuff, 0, sizeof(EVNET_BUF));
+	memset((void*)&PWM_CtrlBuff, 0, sizeof(EVNET_BUF));
+	
+	for(i=0;i<mapping_ITEM_MAX;i++)
+	{
+		Gu8_SWITCH_Delay_OFF_Tmr[i]	= 0;
+		Gu8_SWITCH_Delay_Flag[i]	= 0;
+	}
+}
+
+void EventCtrl(uint8_t touch_switch, uint8_t Flag)	// 스위치
+{
+	uint8_t	i, item, tmp;
+	
+	if(touch_switch && touch_switch < mapping_SWITCH_MAX)
+	{
+		item	= tsn2item(touch_switch);
+		switch(item)
+		{
+			case mapping_ITEM_LIGHT_GROUP:			// 그룹스위치
+				if(GET_Switch_State(item2tsn(mapping_ITEM_LIGHT_ALL)))		// 전체 등이 켜져 있으면
+				{
+					SET_Switch_State(item2tsn(mapping_ITEM_LIGHT_ALL), OFF);
+					SET_LED_State(item2tsn(mapping_ITEM_LIGHT_ALL), OFF);	// 전체등 LED 소등
+					ALL_Light_Switch_Ctrl((uint8_t)(pG_Config->Factory_Mapping_ALL_Light ^ pG_State->User_Mapping_ALL_Light), OFF, DELAY_OFF_PASS);		// 전체등와 그룹등으로 설정된 전등 중 그룹등이 아닌 것은 소등
+				}
+				Flag	= SET_Switch_State(touch_switch, Flag);				// Switch 상태 설정하고 Switch 상태로 Flag 재설정
+				SET_LED_State(touch_switch, Flag);
+				Beep(Flag);
+				if(Flag == OFF)
+				{
+					ALL_Light_Switch_Ctrl(pG_Config->Factory_Mapping_ALL_Light, Flag, DELAY_OFF_PASS);	// 수동으로 켠 등도 끄기위해서
+				}
+				else
+				{
+					ALL_Light_Switch_Ctrl(pG_State->User_Mapping_ALL_Light, Flag, DELAY_OFF_PASS);
+				}
+				break;
+			case mapping_ITEM_LIGHT_ALL:		// 전제 등 스위치
+				if(GET_Switch_State(item2tsn(mapping_ITEM_LIGHT_GROUP)))	// 그룹등이 켜져 있으면
+				{
+					SET_Switch_State(item2tsn(mapping_ITEM_LIGHT_GROUP), OFF);
+					SET_LED_State(item2tsn(mapping_ITEM_LIGHT_GROUP), OFF);	// 그룹등 LED 소등
+					ALL_Light_Switch_Ctrl((uint8_t)(pG_Config->Factory_Mapping_ALL_Light ^ pG_State->User_Mapping_ALL_Light), OFF, DELAY_OFF_PASS);	// 그룹등와 전체등으로 설정된 전등 중 전체등이 아닌 것은 소등
+				}
+				Flag	= SET_Switch_State(touch_switch, Flag);				// Switch 상태 설정하고 Switch 상태로 Flag 재설정
+				SET_LED_State(touch_switch, Flag);
+				Beep(Flag);
+				ALL_Light_Switch_Ctrl(pG_Config->Factory_Mapping_ALL_Light, Flag, DELAY_OFF_CHECK);
+				break;
+			case mapping_ITEM_ELECTRICITY_ALL:	// 전체 전열 스위치
+				if(Flag == INVERSE)	Flag	= (uint8_t)((~GET_Switch_State(touch_switch))&0x01);
+				
+				if(Flag == OFF)
+				{
+					//Beep(BEEP_FLASHING);
+					SET_LED_State(touch_switch, LED_FLASHING);
+					SET_SWITCH_Delay_OFF_Tmr(mapping_ITEM_ELECTRICITY_ALL, ELECTRICITY_DELAY_TIME);				// 전체 전열 지연소등 설정
+					if(pG_Config->Factory_Mapping_ALL_Electricity & CONTROL_BIT_RELAY_LATCH_1)
+					{
+						SET_LED_State(item2tsn(mapping_ITEM_ELECTRICITY_1), LED_FLASHING);
+						SET_SWITCH_Delay_OFF_Tmr(mapping_ITEM_ELECTRICITY_1, ELECTRICITY_DELAY_TIME);				// 전열1 지연소등 설정
+					}
+					if(pG_Config->Factory_Mapping_ALL_Electricity & CONTROL_BIT_RELAY_LATCH_2)
+					{
+						SET_LED_State(item2tsn(mapping_ITEM_ELECTRICITY_2), LED_FLASHING);		// 전열2 지연소등 설정
+						SET_SWITCH_Delay_OFF_Tmr(mapping_ITEM_ELECTRICITY_2, ELECTRICITY_DELAY_TIME);
+					}
+				}
+				else
+				{
+					Flag	= SET_Switch_State(touch_switch, Flag);					// Switch 상태 설정하고 Switch 상태로 Flag 재설정
+					SET_LED_State(touch_switch, Flag);
+					Beep(Flag);
+					//Beep(BEEP_MEL);
+					SET_SWITCH_Delay_OFF_Flag(mapping_ITEM_ELECTRICITY_ALL, 0);				// 전체 전열 지연소등 Flag 클리어
+					SET_SWITCH_Delay_OFF_Flag(mapping_ITEM_ELECTRICITY_1, 0);					// 전열1 지연소등 Flag 클리어
+					SET_SWITCH_Delay_OFF_Flag(mapping_ITEM_ELECTRICITY_2, 0);					// 전열2 지연소등 Flag 클리어
+					ALL_Electricity_Switch_Ctrl(pG_Config->Factory_Mapping_ALL_Electricity, Flag);	// 전체 전열 점등
+				}
+				break;
+			case mapping_ITEM_3WAY_1:
+			case mapping_ITEM_3WAY_2:
+				Flag	= SET_Switch_State(touch_switch, Flag);			// Switch 상태 설정하고 Switch 상태로 Flag 재설정
+				SET_LED_State(touch_switch, Flag);
+				Beep(Flag);
+				PUT_RelayCtrl(item2ctrl(item), Flag);	// 항목기준 제어
+				break;
+			case mapping_ITEM_LIGHT_1:
+			case mapping_ITEM_LIGHT_2:
+			case mapping_ITEM_LIGHT_3:
+			case mapping_ITEM_LIGHT_4:
+			case mapping_ITEM_LIGHT_5:
+			case mapping_ITEM_LIGHT_6:
+				if(Flag == INVERSE)
+				{
+					Flag	= (uint8_t)((~GET_Switch_State(touch_switch))&0x01);
+				}
+				/*	// 개별 제어시 지연소등 없다고 함(사업부)
+				if(pG_State->ETC.DelayOFF)
+				{
+					if(GET_Light_ON_Count() == 1)	// 현재 등이 마지막 등이면
+					{
+						if(Flag == OFF)
+						{
+							SET_LED_State(touch_switch, LED_FLASHING);
+							Beep(BEEP_ONE);
+							SET_SWITCH_Delay_OFF_Tmr(item, LIGHT_DELAY_TIME);
+							break;
+						}
+					}
+				}
+				*/
+				
+#if 0
+				// 지연소등 중 다시 눌렀을 때 바로 꺼져야 하면 이 부분 해제할 것
+				if(GET_LED_State(touch_switch) == LED_FLASHING)
+				{
+					SET_SWITCH_Delay_OFF_Flag(item, 0);
+					Flag	= OFF;
+				}
+#endif
+				
+				Flag	= SET_Switch_State(touch_switch, Flag);			// Switch 상태 설정하고 Switch 상태로 Flag 재설정
+				if(Flag == ON)
+				{
+					for(i=mapping_ITEM_LIGHT_1;i<mapping_ITEM_LIGHT_6;i++)
+					{
+						SET_SWITCH_Delay_OFF_Flag(i, 0);
+						if(tmp	= item2tsn(i))
+						{
+							if(GET_LED_State(tmp) == LED_FLASHING)	SET_LED_State(tmp, LED_ON);
+						}
+					}
+				}
+				SET_LED_State(touch_switch, Flag);
+				Beep(Flag);
+				PUT_RelayCtrl(item2ctrl(item), Flag);		// 항목기준 제어
+				ALL_n_Group_Light_Switch_LED_Ctrl();		// 전체등 & 그룹등 LED 제어
+				break;
+			case mapping_ITEM_ELECTRICITY_1:
+			case mapping_ITEM_ELECTRICITY_2:
+				//printf("mapping_ITEM_SETUP %d\n", GET_Switch_State(item2tsn(mapping_ITEM_SETUP)));
+				
+				if(GET_Switch_State(item2tsn(mapping_ITEM_SETUP)))	// 전열 설정 중이면
+				{
+					SET_SWITCH_Delay_OFF_Flag(mapping_ITEM_ELECTRICITY_ALL, 0);				// 전체 전열 지연소등 Flag 클리어
+					SET_SWITCH_Delay_OFF_Flag(mapping_ITEM_ELECTRICITY_1, 0);					// 전열1 지연소등 Flag 클리어
+					SET_SWITCH_Delay_OFF_Flag(mapping_ITEM_ELECTRICITY_2, 0);					// 전열2 지연소등 Flag 클리어
+					if(item == mapping_ITEM_ELECTRICITY_1)
+					{
+						pG_State->ETC.Auto1	= pG_State->ETC.Auto1 ? 0 : 1;
+					}
+					else
+					{
+						pG_State->ETC.Auto2	= pG_State->ETC.Auto2 ? 0 : 1;
+					}
+					Beep(ON);
+				}
+				else
+				{
+					if(Flag == INVERSE)
+					{
+						Flag	= (uint8_t)((~GET_Switch_State(touch_switch))&0x01);
+					}
+					
+					if(Flag == OFF)
+					{
+						SET_LED_State(touch_switch, LED_FLASHING);
+						//Beep(BEEP_FLASHING);
+						SET_SWITCH_Delay_OFF_Tmr(item, ELECTRICITY_DELAY_TIME);
+					}
+					else
+					{
+						Flag	= SET_Switch_State(touch_switch, Flag);			// Switch 상태 설정하고 Switch 상태로 Flag 재설정
+						SET_LED_State(touch_switch, Flag);
+						Beep(Flag);
+						//Beep(BEEP_MEL);
+						PUT_RelayCtrl(item2ctrl(item), Flag);	// 항목기준 제어
+						SET_SWITCH_Delay_OFF_Flag(item, 0);
+						SET_SWITCH_Delay_OFF_Flag(mapping_ITEM_ELECTRICITY_ALL, 0);	// 전열을 하나라도 켰으면 전제 지연소등 플래그는 클리어
+						//----------------------------------------------------------------------------------------------------------
+						ALL_Electricity_Switch_LED_Ctrl();
+						//----------------------------------------------------------------------------------------------------------
+					}
+				}
+				break;
+			case mapping_ITEM_DIMMING_LIGHT_1:
+			case mapping_ITEM_DIMMING_LIGHT_2:
+				if(Flag == INVERSE)
+				{
+					Flag	= (uint8_t)((~GET_Switch_State(touch_switch))&0x01);
+				}
+				/*	// 개별 제어시 지연소등 없다고 함(사업부)
+				if(pG_State->ETC.DelayOFF)
+				{
+					if(GET_Light_ON_Count() == 1)	// 현재 등이 마지막 등이면
+					{
+						if(Flag == OFF)
+						{
+							SET_LED_State(touch_switch, LED_FLASHING);
+							Beep(BEEP_ONE);
+							SET_SWITCH_Delay_OFF_Tmr(item, LIGHT_DELAY_TIME);
+							break;
+						}
+					}
+				}
+				*/
+				Flag	= SET_Switch_State(touch_switch, Flag);			// Switch 상태 설정하고 Switch 상태로 Flag 재설정
+				if(Flag == ON)
+				{
+					for(i=mapping_ITEM_DIMMING_LIGHT_1;i<mapping_ITEM_DIMMING_LIGHT_2;i++)
+					{
+						SET_SWITCH_Delay_OFF_Flag(i, 0);
+						if(tmp	= item2tsn(i))
+						{
+							if(GET_LED_State(tmp) == LED_FLASHING)	SET_LED_State(tmp, LED_ON);
+						}
+					}
+				}
+				SET_LED_State(touch_switch, Flag);
+				Beep(Flag);
+				PUT_PWMCtrl(item2ctrl(item), Flag);			// 항목기준 제어
+				ALL_n_Group_Light_Switch_LED_Ctrl();		// 전체등 & 그룹등 LED 제어
+				break;
+				
+			case mapping_ITEM_DIMMING_UP:
+				Gu8_LCD_DIM_Tmr					= 50;		// 5s 동안 LCD 표시
+				Gu8_LCD_ElecLimitCurrent_Tmr	= 0;
+				SET_LED_State(touch_switch, LED_DETECT_ON);
+				Beep(ON);
+				if(GET_Switch_State(item2tsn(mapping_ITEM_DIMMING_LIGHT_1)) && GET_Switch_State(item2tsn(mapping_ITEM_DIMMING_LIGHT_2)) )	// 디밍 등이 모두 켜져 있으면
+				{
+					PWM_Level_Set((CONTROL_BIT_DIMMING_1 | CONTROL_BIT_DIMMING_2), LEVEL_UP);
+					PUT_PWMCtrl((CONTROL_BIT_DIMMING_1 | CONTROL_BIT_DIMMING_2), ON);
+				}
+				else if(GET_Switch_State(item2tsn(mapping_ITEM_DIMMING_LIGHT_1)))	// 디밍1 등이 켜져 있으면
+				{
+					PWM_Level_Set(CONTROL_BIT_DIMMING_1, LEVEL_UP);
+					PUT_PWMCtrl(item2ctrl(mapping_ITEM_DIMMING_LIGHT_1), ON);
+				}
+				else if(GET_Switch_State(item2tsn(mapping_ITEM_DIMMING_LIGHT_2)))	// 디밍2 등이 켜져 있으면
+				{
+					PWM_Level_Set(CONTROL_BIT_DIMMING_2, LEVEL_UP);
+					PUT_PWMCtrl(item2ctrl(mapping_ITEM_DIMMING_LIGHT_2), ON);
+				}
+				break;
+				
+			case mapping_ITEM_DIMMING_DN:
+				Gu8_LCD_DIM_Tmr					= 50;		// 5s 동안 LCD 표시
+				Gu8_LCD_ElecLimitCurrent_Tmr	= 0;
+				SET_LED_State(touch_switch, LED_DETECT_ON);
+				Beep(ON);
+				if(GET_Switch_State(item2tsn(mapping_ITEM_DIMMING_LIGHT_1)) && GET_Switch_State(item2tsn(mapping_ITEM_DIMMING_LIGHT_2)) )	// 디밍 등이 모두 켜져 있으면
+				{
+					PWM_Level_Set((CONTROL_BIT_DIMMING_1 | CONTROL_BIT_DIMMING_2), LEVEL_DN);
+					PUT_PWMCtrl((CONTROL_BIT_DIMMING_1 | CONTROL_BIT_DIMMING_2), ON);
+				}
+				else if(GET_Switch_State(item2tsn(mapping_ITEM_DIMMING_LIGHT_1)))	// 디밍1 등이 켜져 있으면
+				{
+					PWM_Level_Set(CONTROL_BIT_DIMMING_1, LEVEL_DN);
+					PUT_PWMCtrl(item2ctrl(mapping_ITEM_DIMMING_LIGHT_1), ON);
+				}
+				else if(GET_Switch_State(item2tsn(mapping_ITEM_DIMMING_LIGHT_2)))	// 디밍2 등이 켜져 있으면
+				{
+					PWM_Level_Set(CONTROL_BIT_DIMMING_2, LEVEL_DN);
+					PUT_PWMCtrl(item2ctrl(mapping_ITEM_DIMMING_LIGHT_2), ON);
+				}
+				break;
+			case mapping_ITEM_SETUP:
+				Flag	= SET_Switch_State(touch_switch, Flag);
+				if(Flag == ON)
+				{
+					SET_LED_State(touch_switch, LED_FLASHING);
+				}
+				else
+				{
+					SET_LED_State(touch_switch, OFF);
+				}
+				Beep(Flag);
+				break;
+				
+			case mapping_ITEM_BATCH_LIGHT_OFF:
+				//if(pG_State->ETC.DelayOFF)		// jsyoon 20200925
+				{
+					if(Flag == OFF)
+					{
+						if(GET_LED_State(touch_switch) == LED_FLASHING)
+						{
+							SET_SWITCH_Delay_OFF_Flag(item, 0);
+						}
+						else
+						{
+							SET_LED_State(touch_switch, LED_FLASHING);
+							Beep(BEEP_ONE);
+							SET_SWITCH_Delay_OFF_Tmr(item, LIGHT_DELAY_TIME);
+							break;
+						}
+					}
+				}
+				Flag	= SET_Switch_State(touch_switch, Flag);			// Switch 상태 설정하고 Switch 상태로 Flag 재설정
+				SET_LED_State(touch_switch, Flag);
+				Beep(Flag);
+				// 일괄소등이 켜졌다는 것은 릴레이 OFF 동작으로 집안의 모든등을 끈다는 의미임
+				// 일괄소등이 꺼졌다는 것은 릴레이 ON 동작으로 집안의 모든등에 전원이 공급되어 제어를 할 수 있다는 의미임
+				PUT_RelayCtrl(item2ctrl(item), Flag);		// 항목기준 제어
+				break;
+				
+			case mapping_ITEM_GAS:		// 무조건 차단만 실행
+				Flag	= SET_Switch_State(touch_switch, ON);
+				if(Gu16_GAS_Off_Tmr <= SETTING_GAS_4S_TMR)		// 1초 뒤 다시 누르면 전송할 수 있음
+				{
+					Gu16_GAS_Off_Tmr	= SETTING_GAS_5S_TMR;		// 3초 경과 후 LED 소등
+					SET_LED_State(touch_switch, LED_FLASHING);
+					GAS_Off();
+				}
+				Beep(ON);
+				break;
+				
+			case mapping_ITEM_ELEVATOR:
+				Flag	= SET_Switch_State(touch_switch, Flag);
+				if(Flag == ON)
+				{
+					SET_LED_State(touch_switch, LED_FLASHING);
+					ELEVATOR_Call();
+				}
+				else
+				{
+					SET_LED_State(touch_switch, ON);
+					ELEVATOR_Cancel();
+				}
+				Beep(Flag);
+				break;
+				
+		}
+	}
+}
+//--------------------------------------------------------------------------------------------------------------
+void SWITCH_Delay_OFF_Process(void)
+{
+	uint8_t item;
+	uint8_t touch_switch;
+	uint8_t	ctrl;
+	uint8_t	Flag	= OFF;
+	
+	for(item=mapping_ITEM_LIGHT_1;item<=mapping_ITEM_DIMMING_LIGHT_2;item++)
+	{
+		if(GET_SWITCH_Delay_OFF_Flag(item))
+		{
+			//printf("(%d)\n", item);	// TEST
+			if(GET_SWITCH_Delay_OFF_Tmr(item) == 0)
+			{
+				
+				touch_switch	= item2tsn(item);
+				SET_Switch_State(touch_switch, Flag);
+				//SET_LED_State(touch_switch, Flag);
+				SET_LED_State(touch_switch, OFF);
+				Beep(Flag);
+								
+				ctrl	= item2ctrl(item);
+				
+				printf("[%d%X]\n", touch_switch, ctrl);	// TEST
+				if(ctrl & (uint8_t)(CONTROL_BIT_DIMMING_1 | CONTROL_BIT_DIMMING_2) )
+				{
+					printf("p\n");	// TEST
+					PUT_PWMCtrl(ctrl, Flag);
+				}
+				else
+				{
+					printf("P");	// TEST
+					PUT_RelayCtrl(ctrl, Flag);
+				}
+				ALL_n_Group_Light_Switch_LED_Ctrl();		// 전체등 & 그룹등 LED 제어
+				SET_SWITCH_Delay_OFF_Flag(item, 0);
+			}
+		}
+	}
+	
+	if(GET_SWITCH_Delay_OFF_Flag(mapping_ITEM_ELECTRICITY_ALL))
+	{
+		if(GET_SWITCH_Delay_OFF_Tmr(mapping_ITEM_ELECTRICITY_ALL) == 0)
+		{
+			touch_switch	= item2tsn(mapping_ITEM_ELECTRICITY_ALL);
+			SET_Switch_State(touch_switch, OFF);
+			SET_LED_State(touch_switch, OFF);
+			//if(beep == 0)
+			{
+				Beep(OFF);
+				//beep = 1;
+			}
+			ALL_Electricity_Switch_Ctrl(pG_Config->Factory_Mapping_ALL_Electricity, OFF);	// 전체등 소등
+			
+			SET_SWITCH_Delay_OFF_Flag(mapping_ITEM_ELECTRICITY_ALL, 0);
+		}
+	}
+	
+	for(item=mapping_ITEM_ELECTRICITY_1;item<=mapping_ITEM_ELECTRICITY_2;item++)
+	{
+		if(GET_SWITCH_Delay_OFF_Flag(item))
+		{
+			if(GET_SWITCH_Delay_OFF_Tmr(item) == 0)
+			{
+				touch_switch	= item2tsn(item);
+				SET_Switch_State(touch_switch, OFF);
+				SET_LED_State(touch_switch, OFF);
+				//if(beep == 0)
+				{
+					Beep(OFF);
+					//beep = 1;
+				}
+				PUT_RelayCtrl(item2ctrl(item), OFF);	// 항목기준 제어
+				
+				SET_SWITCH_Delay_OFF_Flag(item, 0);
+				
+				ALL_Electricity_Switch_LED_Ctrl();
+			}
+		}
+	}
+	
+}
+//--------------------------------------------------------------------------------------------------------------
+void SET_SWITCH_Delay_OFF_Tmr(uint8_t item, uint8_t tmr)
+{
+	if(item > mapping_ITEM_DISABLE && item < mapping_ITEM_MAX)
+	{
+		SET_SWITCH_Delay_OFF_Flag(item, 1);
+		Gu8_SWITCH_Delay_OFF_Tmr[item]	= tmr;		// 5sec 후 소등
+	}
+	else
+	{
+		printf("ERR : set d-off \n");
+	}
+}
+
+uint8_t GET_SWITCH_Delay_OFF_Tmr(uint8_t item)
+{
+	uint8_t	ret	 = 0;
+	
+	if(item > mapping_ITEM_DISABLE && item < mapping_ITEM_MAX)
+	{
+		ret	= Gu8_SWITCH_Delay_OFF_Tmr[item];
+	}
+	else
+	{
+		//ret	= 0xFF;
+		printf("ERR : get d-off\n");
+	}
+	
+	return ret;
+}
+
+void SET_SWITCH_Delay_OFF_Flag(uint8_t item, uint8_t Flag)
+{
+	if(item > mapping_ITEM_DISABLE && item < mapping_ITEM_MAX)
+	{
+		Gu8_SWITCH_Delay_Flag[item]		= Flag;
+	}
+	else
+	{
+		//ret	= 0xFF;
+		printf("ERR : set d-off flag\n");
+	}
+}
+
+uint8_t GET_SWITCH_Delay_OFF_Flag(uint8_t item)
+{
+	uint8_t	ret	 = 0;
+	
+	if(item > mapping_ITEM_DISABLE && item < mapping_ITEM_MAX)
+	{
+		ret	= Gu8_SWITCH_Delay_Flag[item];
+	}
+	else
+	{
+		//ret	= 0xFF;
+		printf("ERR : get d-off flag\n");
+	}
+	
+	return ret;
+}
+//--------------------------------------------------------------------------------------------------------------
+void PUT_RelayCtrl(uint8_t Ctrl, uint8_t Flag)
+{
+	Relay_CtrlBuff.Ctrl[Relay_CtrlBuff.PUT_Event_Cnt]	= Ctrl;
+	Relay_CtrlBuff.Flag[Relay_CtrlBuff.PUT_Event_Cnt]	= Flag;
+	Relay_CtrlBuff.PUT_Event_Cnt++;
+	if(Relay_CtrlBuff.PUT_Event_Cnt >= MAX_EVENT_BUF)	Relay_CtrlBuff.PUT_Event_Cnt	= 0;
+}
+
+void PUT_PWMCtrl(uint8_t Ctrl, uint8_t Flag)
+{
+	PWM_CtrlBuff.Ctrl[PWM_CtrlBuff.PUT_Event_Cnt]	= Ctrl;
+	PWM_CtrlBuff.Flag[PWM_CtrlBuff.PUT_Event_Cnt]	= Flag;
+	PWM_CtrlBuff.PUT_Event_Cnt++;
+	if(PWM_CtrlBuff.PUT_Event_Cnt >= MAX_EVENT_BUF)	PWM_CtrlBuff.PUT_Event_Cnt	= 0;
+}
+
+uint8_t Event_Empt(void)
+{
+	uint8_t	ret	= 0;
+	
+	if(Relay_CtrlBuff.PUT_Event_Cnt == Relay_CtrlBuff.GET_Event_Cnt)
+	{
+		if(PWM_CtrlBuff.PUT_Event_Cnt == PWM_CtrlBuff.GET_Event_Cnt)
+		{
+			ret	= 1;
+		}
+	}
+	
+	return ret;
+}
+
+void GET_Event(void)	// Zorocrossing 상태에서 릴리이 및 PWM이 동작
+{
+	if(Relay_CtrlBuff.PUT_Event_Cnt != Relay_CtrlBuff.GET_Event_Cnt)
+	{
+		Relay_Ctrl(Relay_CtrlBuff.Ctrl[Relay_CtrlBuff.GET_Event_Cnt], Relay_CtrlBuff.Flag[Relay_CtrlBuff.GET_Event_Cnt]);	// 릴레이 제어
+		Relay_CtrlBuff.GET_Event_Cnt++;
+		if(Relay_CtrlBuff.GET_Event_Cnt >= MAX_EVENT_BUF)	Relay_CtrlBuff.GET_Event_Cnt	= 0;
+	}
+	else if(PWM_CtrlBuff.PUT_Event_Cnt != PWM_CtrlBuff.GET_Event_Cnt)
+	{
+		PWM_Ctrl(PWM_CtrlBuff.Ctrl[PWM_CtrlBuff.GET_Event_Cnt], PWM_CtrlBuff.Flag[PWM_CtrlBuff.GET_Event_Cnt]);				// PWM 제어
+		PWM_CtrlBuff.GET_Event_Cnt++;
+		if(PWM_CtrlBuff.GET_Event_Cnt >= MAX_EVENT_BUF)	PWM_CtrlBuff.GET_Event_Cnt	= 0;
+	}
+}
+//--------------------------------------------------------------------------------------------------------------
+uint8_t SET_Switch_State(uint8_t touch_switch, uint8_t Flag)
+{
+	uint8_t	Led_Flag;
+	
+	if(Flag == INVERSE)
+	{
+		Flag	= (uint8_t)((~GET_Switch_State(touch_switch))&0x01);
+	}
+	
+	switch(touch_switch)
+	{
+		case 1:		pG_State->SW_State.Bit.N1	= Flag;	break;
+		case 2:		pG_State->SW_State.Bit.N2	= Flag;	break;
+		case 3:		pG_State->SW_State.Bit.N3	= Flag;	break;
+		case 4:		pG_State->SW_State.Bit.N4	= Flag;	break;
+		case 5:		pG_State->SW_State.Bit.N5	= Flag;	break;
+		case 6:		pG_State->SW_State.Bit.N6	= Flag;	break;
+		case 7:		pG_State->SW_State.Bit.N7	= Flag;	break;
+		case 8:		pG_State->SW_State.Bit.N8	= Flag;	break;
+		case 9:		pG_State->SW_State.Bit.N9	= Flag;	break;
+		case 10:	pG_State->SW_State.Bit.N10	= Flag;	break;
+		case 11:	pG_State->SW_State.Bit.N11	= Flag;	break;
+		case 12:	pG_State->SW_State.Bit.N12	= Flag;	break;
+		case 13:	pG_State->SW_State.Bit.N13	= Flag;	break;
+		case 14:	pG_State->SW_State.Bit.N14	= Flag;	break;
+		case 15:	pG_State->SW_State.Bit.N15	= Flag;	break;
+		case 16:	pG_State->SW_State.Bit.N16	= Flag;	break;
+		default:	Flag	= 0;	break;
+	}
+	
+	return Flag;
+}
+
+uint8_t GET_Switch_State(uint8_t touch_switch)
+{
+	uint8_t	ret = 0;
+	switch(touch_switch)
+	{
+		case 1:		ret	= pG_State->SW_State.Bit.N1;	break;
+		case 2:		ret	= pG_State->SW_State.Bit.N2;	break;
+		case 3:		ret	= pG_State->SW_State.Bit.N3;	break;
+		case 4:		ret	= pG_State->SW_State.Bit.N4;	break;
+		case 5:		ret	= pG_State->SW_State.Bit.N5;	break;
+		case 6:		ret	= pG_State->SW_State.Bit.N6;	break;
+		case 7:		ret	= pG_State->SW_State.Bit.N7;	break;
+		case 8:		ret	= pG_State->SW_State.Bit.N8;	break;
+		case 9:		ret	= pG_State->SW_State.Bit.N9;	break;
+		case 10:	ret	= pG_State->SW_State.Bit.N10;	break;
+		case 11:	ret	= pG_State->SW_State.Bit.N11;	break;
+		case 12:	ret	= pG_State->SW_State.Bit.N12;	break;
+		case 13:	ret	= pG_State->SW_State.Bit.N13;	break;
+		case 14:	ret	= pG_State->SW_State.Bit.N14;	break;
+		case 15:	ret	= pG_State->SW_State.Bit.N15;	break;
+		case 16:	ret	= pG_State->SW_State.Bit.N16;	break;
+		default:	ret	= 0;	break;
+	}
+	return ret;
+}
+
+uint8_t	GET_Light_State(void)		// 리턴
+{
+	uint8_t	ret	= 0;
+	
+	if(GET_Switch_State(item2tsn(mapping_ITEM_3WAY_1)))				ret	|= item2ctrl(mapping_ITEM_3WAY_1);
+	if(GET_Switch_State(item2tsn(mapping_ITEM_3WAY_2)))				ret	|= item2ctrl(mapping_ITEM_3WAY_2);
+	if(GET_Switch_State(item2tsn(mapping_ITEM_LIGHT_1)))			ret	|= item2ctrl(mapping_ITEM_LIGHT_1);
+	if(GET_Switch_State(item2tsn(mapping_ITEM_LIGHT_2)))			ret	|= item2ctrl(mapping_ITEM_LIGHT_2);
+	if(GET_Switch_State(item2tsn(mapping_ITEM_LIGHT_3)))			ret	|= item2ctrl(mapping_ITEM_LIGHT_3);
+	if(GET_Switch_State(item2tsn(mapping_ITEM_LIGHT_4)))			ret	|= item2ctrl(mapping_ITEM_LIGHT_4);
+	if(GET_Switch_State(item2tsn(mapping_ITEM_LIGHT_5)))			ret	|= item2ctrl(mapping_ITEM_LIGHT_5);
+	if(GET_Switch_State(item2tsn(mapping_ITEM_LIGHT_6))) 			ret	|= item2ctrl(mapping_ITEM_LIGHT_6);
+	if(GET_Switch_State(item2tsn(mapping_ITEM_DIMMING_LIGHT_1)))	ret	|= item2ctrl(mapping_ITEM_DIMMING_LIGHT_1);
+	if(GET_Switch_State(item2tsn(mapping_ITEM_DIMMING_LIGHT_2)))	ret	|= item2ctrl(mapping_ITEM_DIMMING_LIGHT_2);
+	
+	if(GET_Switch_State(item2tsn(mapping_ITEM_BATCH_LIGHT_OFF)))	ret	|= item2ctrl(mapping_ITEM_BATCH_LIGHT_OFF);
+	
+	return ret;
+}
+
+uint8_t	GET_Light_ON_Count(void)		// 켜져있는 등의 갯수
+{
+	uint8_t	ret	= 0;
+	
+	if(GET_Switch_State(item2tsn(mapping_ITEM_3WAY_1)))				ret++;
+	if(GET_Switch_State(item2tsn(mapping_ITEM_3WAY_2)))				ret++;
+	if(GET_Switch_State(item2tsn(mapping_ITEM_LIGHT_1)))			ret++;
+	if(GET_Switch_State(item2tsn(mapping_ITEM_LIGHT_2)))			ret++;
+	if(GET_Switch_State(item2tsn(mapping_ITEM_LIGHT_3)))			ret++;
+	if(GET_Switch_State(item2tsn(mapping_ITEM_LIGHT_4)))			ret++;
+	if(GET_Switch_State(item2tsn(mapping_ITEM_LIGHT_5)))			ret++;
+	if(GET_Switch_State(item2tsn(mapping_ITEM_LIGHT_6))) 			ret++;
+	if(GET_Switch_State(item2tsn(mapping_ITEM_DIMMING_LIGHT_1)))	ret++;
+	if(GET_Switch_State(item2tsn(mapping_ITEM_DIMMING_LIGHT_2)))	ret++;
+	
+	if(GET_Switch_State(item2tsn(mapping_ITEM_BATCH_LIGHT_OFF)))	ret++;
+	
+	return ret;
+}
+
+uint8_t	GET_Electricity_State(void)		// 리턴
+{
+	uint8_t	ret	= 0;
+	
+	if(GET_Switch_State(item2tsn(mapping_ITEM_ELECTRICITY_1)))		ret	|= item2ctrl(mapping_ITEM_ELECTRICITY_1);
+	if(GET_Switch_State(item2tsn(mapping_ITEM_ELECTRICITY_2)))		ret	|= item2ctrl(mapping_ITEM_ELECTRICITY_2);
+	
+	return ret;
+}
+
+void ALL_Light_Switch_Ctrl(uint8_t ctrl, uint8_t Flag, uint8_t DelayOFF_Flag)
+{
+	uint8_t	touch_switch;
+	uint8_t	item;
+	
+	//for(item=mapping_ITEM_LIGHT_1; item < mapping_ITEM_MAX; item++)
+	for(item=mapping_ITEM_MAX-1; item > mapping_ITEM_DISABLE; item--)	// 20200709	사업팀 요청으로 기능 수정함(추이사, 심차장), 첫번째 등 지연소등
+	{
+		if(item2ctrl(item) & ctrl)
+		{
+			touch_switch	= item2tsn(item);
+			if(Flag == INVERSE)
+			{
+				Flag	= (uint8_t)((~GET_Switch_State(touch_switch))&0x01);
+			}
+			
+			if(pG_State->ETC.DelayOFF && DelayOFF_Flag == DELAY_OFF_CHECK)
+			{
+				if(GET_Light_ON_Count() == 1 && GET_Switch_State(touch_switch))	// 현재등이 켜져 있고 마지막 등이면
+				{
+					if(Flag == OFF)
+					{
+						SET_LED_State(touch_switch, LED_FLASHING);
+						SET_SWITCH_Delay_OFF_Tmr(item, LIGHT_DELAY_TIME);
+						continue;
+					}
+				}
+				//SET_SWITCH_Delay_OFF_Flag(item, 0);
+			}
+			
+			SET_Switch_State(touch_switch, Flag);
+			if(Flag == ON)
+			{
+				//if(GET_SWITCH_Delay_OFF_Flag(item))
+				{
+					SET_SWITCH_Delay_OFF_Flag(item, 0);
+				}
+			}
+			
+			SET_LED_State(touch_switch, Flag);
+			if(item2ctrl(item) & (uint8_t)(CONTROL_BIT_DIMMING_1 | CONTROL_BIT_DIMMING_2) )
+			{
+				PUT_PWMCtrl(item2ctrl(item), Flag);
+			}
+			else
+			{
+				PUT_RelayCtrl(item2ctrl(item), Flag);
+			}
+		}
+	}
+}
+
+void ALL_Electricity_Switch_Ctrl(uint8_t ctrl, uint8_t Flag)
+{
+	uint8_t	touch_switch;
+	uint8_t	item;
+	
+	if(ctrl & CONTROL_BIT_RELAY_LATCH_1)
+	{
+		item	= ctrl2item(CONTROL_BIT_RELAY_LATCH_1);
+		if(item)
+		{
+			touch_switch	= item2tsn(item);
+			SET_Switch_State(touch_switch, Flag);
+			SET_LED_State(touch_switch, Flag);
+			PUT_RelayCtrl(item2ctrl(item), Flag);
+		}
+	}
+	if(ctrl & CONTROL_BIT_RELAY_LATCH_2)
+	{
+		item	= ctrl2item(CONTROL_BIT_RELAY_LATCH_2);
+		if(item)
+		{
+			touch_switch	= item2tsn(item);
+			SET_Switch_State(touch_switch, Flag);
+			SET_LED_State(touch_switch, Flag);
+			PUT_RelayCtrl(item2ctrl(item), Flag);
+		}
+	}
+}
+//--------------------------------------------------------------------------------------------------------------
+
+void Touch_Evente_Control(uint8_t touch_switch, uint8_t tmr)
+{
+	uint8_t Flag;
+	uint8_t item;
+	
+	Flag	= (uint8_t)((~GET_Switch_State(touch_switch))&0x01);
+	item	= tsn2item(touch_switch);
+	if(GET_SWITCH_Delay_OFF_Flag(item))
+	{
+		if(item == mapping_ITEM_BATCH_LIGHT_OFF)
+		{
+			Flag = OFF;									// 일광소등은 지연오프 대기중에 다시 제어를 하면 복구가 아닌 즉시 제어
+		}
+		else
+		{
+			Flag = ON;									// 지연오프 대기중이면 원래대로 복구
+		}
+	}
+	if(Flag)
+	{
+		if(pG_Config->Mapping_TSN_OnTmr[touch_switch-1] <= tmr)
+		{
+			//Gu8_LCD_ElecLimitCurrent_Flashing_Flag	= 0;
+			//Gu8_PowerSaving_Tmr	= POWER_SAVING_TMR;
+			Gu8_ElecLimitCurrent_1_Tmr	= ELEC_LIMIT_CURRENT_TIME;		// 120sec
+			Gu8_ElecLimitCurrent_2_Tmr	= ELEC_LIMIT_CURRENT_TIME;		// 120sec
+			
+			EventCtrl(touch_switch, ON);
+			SET_Touch_Ignore_Flag(touch_switch, SET_IGNORE_SWITCH);		// 스위치를 계속 누르고 있으면 반복 동작을 하게되는데 이를 방지하기 위해
+		}
+	}
+	else
+	{
+		if(pG_Config->Mapping_TSN_OffTmr[touch_switch-1] <= tmr)
+		{
+			//Gu8_LCD_ElecLimitCurrent_Flashing_Flag	= 0;
+			//Gu8_PowerSaving_Tmr	= POWER_SAVING_TMR;
+			Gu8_ElecLimitCurrent_1_Tmr	= ELEC_LIMIT_CURRENT_TIME;		// 120sec
+			Gu8_ElecLimitCurrent_2_Tmr	= ELEC_LIMIT_CURRENT_TIME;		// 120sec
+			
+			EventCtrl(touch_switch, OFF);
+			SET_Touch_Ignore_Flag(touch_switch, SET_IGNORE_SWITCH);		// 스위치를 계속 누르고 있으면 반복 동작을 하게되는데 이를 방지하기 위해
+		}
+	}
+}
+
+void Group_Light_Setup(uint8_t touch_switch, uint8_t tmr)
+{
+	uint8_t	i;
+	
+	switch(tsn2item(touch_switch))
+	{
+		case mapping_ITEM_LIGHT_GROUP:
+			if(GET_Touch_Ignore_Flag(touch_switch) != SET_SPECIAL_SWITCH)
+			{
+				SET_Touch_Ignore_Flag(touch_switch, SET_IGNORE_SWITCH);
+				pG_State->User_Mapping_ALL_Light	= GET_Light_State();
+				Beep(OFF);
+				Gu8_LightGroup_SET_Flag	= 0;		// 설정 완료
+				if(GET_Switch_State(touch_switch))
+				{
+					SET_LED_State(touch_switch, LED_ON);
+				}
+				else
+				{
+					SET_LED_State(touch_switch, LED_OFF);
+				}
+			}
+			break;
+		case mapping_ITEM_LIGHT_1:
+		case mapping_ITEM_LIGHT_2:
+		case mapping_ITEM_LIGHT_3:
+		case mapping_ITEM_LIGHT_4:
+		case mapping_ITEM_LIGHT_5:
+		case mapping_ITEM_LIGHT_6:
+		case mapping_ITEM_3WAY_1:
+		case mapping_ITEM_3WAY_2:
+		case mapping_ITEM_DIMMING_LIGHT_1:
+		case mapping_ITEM_DIMMING_LIGHT_2:
+			Touch_Evente_Control(touch_switch, tmr);	// 스위치 동작시간 체크 후 제어
+			break;
+	}
+}
+
+void Special_Function_Key_Process(uint8_t touch_switch, uint8_t tmr)
+{
+	if(touch_switch && touch_switch < mapping_SWITCH_MAX)
+	{
+		SET_Touch_Ignore_Flag(touch_switch, SET_SPECIAL_SWITCH);
+		
+		if(GET_Switch_State(item2tsn(mapping_ITEM_SETUP)))	// 설정키가 동작 중이면
+		{
+			if(SETTING_1S_TMR <= tmr)		// 1sec
+			{
+				switch(tsn2item(touch_switch))
+				{
+					case mapping_ITEM_ELECTRICITY_1:
+						if(((double)Gu16_LCD_Watt_1 * 0.8) < 0.0)	Gu16_ElecLimitCurrent_1	= 0;
+						else										Gu16_ElecLimitCurrent_1	= (uint16_t)((double)Gu16_LCD_Watt_1 * 0.8);	// 현재 값의 80%로 저장
+						pG_State->ETC.Auto1		= 1;
+						Gu8_LCD_ElecLimitCurrent_Flashing_Flag	= 1;
+						Gu8_LCD_ElecLimitCurrent_Tmr			= 0;
+						Store_ElecLimitCurrent();
+						Beep(BEEP_MEL);
+						//Beep(BEEP_TWO);
+						break;
+						
+					case mapping_ITEM_ELECTRICITY_2:
+						if(((double)Gu16_LCD_Watt_2 * 0.8) < 0.0)	Gu16_ElecLimitCurrent_2	= 0;
+						else										Gu16_ElecLimitCurrent_2	= (uint16_t)((double)Gu16_LCD_Watt_2 * 0.8);	// 현재 값의 80%로 저장
+						pG_State->ETC.Auto2		= 1;
+						Gu8_LCD_ElecLimitCurrent_Flashing_Flag	= 11;
+						Gu8_LCD_ElecLimitCurrent_Tmr			= 0;
+						Store_ElecLimitCurrent();
+						Beep(BEEP_MEL);
+						break;
+				}
+			}
+		}
+		else												// 설정키 동작중이 아니면
+		{
+			if(SETTING_10S_TMR <= tmr)						// 10sec 이상 눌렀으면
+			{
+				;
+			}
+			else if(SETTING_5S_TMR <= tmr)					// 5sec 이상 눌렀으면
+			{
+				/*	20200709	사업팀 요청으로 기능 삭제함(추이사, 심차장)
+				switch(tsn2item(touch_switch))
+				{
+					case mapping_ITEM_LIGHT_1:
+					case mapping_ITEM_BATCH_LIGHT_OFF:		// 일괄소등
+						
+						if(pG_State->ETC.BeepMode)
+						{
+							Beep(BEEP_MEL);
+							pG_State->ETC.BeepMode	= 0;
+						}
+						else
+						{
+							pG_State->ETC.BeepMode	= 1;
+							Beep(BEEP_MEL);
+						}
+						//printf("beep mode %d\n", (uint16_t)pG_State->ETC.BeepMode);
+						break;
+				}
+				*/
+			}
+			else if(SETTING_2S_TMR <= tmr)					// 2sec 이상 눌렀으면
+			{
+				switch(tsn2item(touch_switch))
+				{
+					/*	20200709	사업팀 요청으로 기능 삭제함(추이사, 심차장)
+					case mapping_ITEM_LIGHT_1:
+					case mapping_ITEM_BATCH_LIGHT_OFF:		// 일괄소등
+						Beep(BEEP_MEL);
+						if(pG_State->ETC.DelayOFF)	pG_State->ETC.DelayOFF	= 0;
+						else						pG_State->ETC.DelayOFF	= 1;
+						//printf("delay off %d\n", (uint16_t)pG_State->ETC.DelayOFF);
+						break;
+					*/
+					case mapping_ITEM_LIGHT_GROUP:
+						Beep(ON);
+						Gu8_LightGroup_SET_Flag	= 1;
+						SET_LED_State(touch_switch, LED_FLASHING);
+						if(GET_Switch_State(touch_switch) == 0)				// 그룹조명이 꺼져 있으면
+						{
+							Touch_Evente_Control(touch_switch, tmr);		// 스위치 제어
+						}
+						break;
+				}
+			}
+		}
+	}
+	Gu8_Special_Function_Key		= 0;
+	Gu8_Special_Function_Key_Tmr	= 0;
+}
+
+void TouchSwitch_Action_Check(uint8_t touch_switch, uint8_t tmr)
+{
+	if(TouchConfig.MAX_TouchChip >= 1)	// GT308L
+	{
+		if(touch_switch && touch_switch < mapping_SWITCH_MAX)
+		{
+			switch(pG_State->ETC.LED_Mode)
+			{
+				case LED_OFF__LIGHT_IS_ON:
+					if(GET_Touch_Ignore_Flag(touch_switch) == IGNORE_CLEAR)				// 스위치 무시가 아니면
+					{
+						;
+					}
+					else if(GET_Touch_Ignore_Flag(touch_switch) != SET_SPECIAL_SWITCH)	// 특수키 무시가 아니면
+					{
+						if(SETTING_10S_TMR <= tmr)									// 10sec 이상 눌렀으면
+						{
+							memset((void*)&cmpTouchConfig, 0, sizeof(TOUCH_CFG));	// 터치칩 초기화
+						}
+					}
+					if(Gu8_PowerSaving_Tmr == 0)	// 전등이 켜지면 LED OFF, 꺼지면 LED ON	 and 슬립모드였을 경우 
+					{
+						Gu8_PowerSaving_Tmr			= POWER_SAVING_TMR;								// 5sec 설정 및 wakeup (터치에 대한 동작없음)
+						SET_Touch_Ignore_Flag(touch_switch, SET_IGNORE_SWITCH);
+						break;
+					}
+				case LED_OFF__LIGHT_IS_ON_2:
+				default:
+					Gu8_PowerSaving_Tmr			= POWER_SAVING_TMR;	// 5sec
+					Gu8_INFO_Disp_Tmr			= 0xFF;									// 최초 부팅 후 한번이라도 터치가 있으면 LCD 정보출력 중지
+					if(GET_Touch_Ignore_Flag(touch_switch) == IGNORE_CLEAR)				// 스위치 무시가 아니면
+					{
+						if(Gu8_LightGroup_SET_Flag)										// 그룹조명 설정 동작
+						{
+							Group_Light_Setup(touch_switch, tmr);
+						}
+						else if(GET_Switch_State(item2tsn(mapping_ITEM_SETUP)))			// 전열 설정 동작
+						{
+							switch(tsn2item(touch_switch))
+							{
+								case mapping_ITEM_ELECTRICITY_1:
+								case mapping_ITEM_ELECTRICITY_2:
+									Touch_Evente_Control(touch_switch, 255);			// OFF 시간과 관계없이 즉시 전달
+									break;
+								default:
+									Touch_Evente_Control(touch_switch, tmr);			// 전열 이외는 스위치 동작시간 체크 후 제어
+									break;
+							}
+						}
+						else															// 일반동작
+						{
+							Touch_Evente_Control(touch_switch, tmr);					// 스위치 동작시간 체크 후 제어
+						}
+					}
+					else if(GET_Touch_Ignore_Flag(touch_switch) != SET_SPECIAL_SWITCH)	// 특수키 무시가 아니면
+					{
+						Gu8_Special_Function_Key		= touch_switch;
+						Gu8_Special_Function_Key_Tmr	= tmr;
+						
+						if(SETTING_10S_TMR <= tmr)						// 10sec 이상 눌렀으면
+						{
+							memset((void*)&cmpTouchConfig, 0, sizeof(TOUCH_CFG));	// 터치칩 초기화
+						}
+						else if(GET_Switch_State(item2tsn(mapping_ITEM_SETUP)))		// 설정키가 동작 중이면
+						{
+							if(SETTING_1S_TMR <= Gu8_Special_Function_Key_Tmr)	// 설정할 수 있는 최대시간을 넘으면 특수키 즉시실행
+							{
+								Special_Function_Key_Process(Gu8_Special_Function_Key, Gu8_Special_Function_Key_Tmr);		// 즉시실행하기 위해
+							}
+						}
+						else
+						{
+							if(SETTING_10S_TMR <= Gu8_Special_Function_Key_Tmr)	// 설정할 수 있는 최대시간을 넘으면 특수키 즉시실행
+							{
+								Special_Function_Key_Process(Gu8_Special_Function_Key, Gu8_Special_Function_Key_Tmr);
+							}
+						}
+					}
+					break;
+			}
+		}
+	}
+}
+//---------------------------------------------------------------------------------------------------------------
+extern const uint8_t *str_mapping[mapping_ITEM_MAX];
+void Control_Recovery_Init(void)
+{
+	uint8_t i;
+	uint8_t flag = 0;
+	
+	printf("Control Recovery Init\n");
+	
+	// 전체, 그룹 스위치가 켜져 있는지 확인
+	for(i=mapping_SWITCH_1;i<mapping_SWITCH_MAX;i++)
+	{
+		if(GET_Switch_State(i))				// 켜져 있었는지 확인
+		{
+			switch(tsn2item(i))
+			{
+				case mapping_ITEM_LIGHT_ALL:		// 전등 ALL 스위치
+					flag	|= 0x01;
+					break;			
+				case mapping_ITEM_ELECTRICITY_ALL:	// 전열 ALL 스위치
+					flag	|= 0x02;				// 전체전열이 켜져 있었는지 확인
+					break;
+				case mapping_ITEM_LIGHT_GROUP:			// 전등 GROUP 스위치
+					flag	|= 0x04;				// 그룹 전등이 켜져 있었는지 확인
+					break;
+			}
+		}
+	}
+	
+	// 전체, 그룹 스위치가 켜져 있으면 그에 해당하는 동작은 OFF로 설정
+	for(i=mapping_SWITCH_1;i<mapping_SWITCH_MAX;i++)
+	{
+		switch(tsn2item(i))
+		{
+			case mapping_ITEM_LIGHT_1:				// 전등 1 (릴레이 제어)
+			case mapping_ITEM_LIGHT_2:				// 전등 2 (릴레이 제어)
+			case mapping_ITEM_LIGHT_3:				// 전등 3 (릴레이 제어)
+			case mapping_ITEM_LIGHT_4:				// 전등 4 (릴레이 제어)
+			case mapping_ITEM_LIGHT_5:				// 전등 5 (릴레이 제어)
+			case mapping_ITEM_LIGHT_6:				// 전등 6 (릴레이 제어)
+			case mapping_ITEM_DIMMING_LIGHT_1:		// 디밍1 스위치(PWM 제어)
+			case mapping_ITEM_DIMMING_LIGHT_2:		// 디밍2 스위치(PWM 제어)
+				if(flag & 0x01)			// 전체등이 켜져 있으면
+				{
+					SET_Switch_State(i, OFF);		// 전체등이 있으면 일반 등 스위치 상태 클리어
+				}
+				else if(flag & 0x04)	// 그룹등이 켜져 있으면
+				{
+					SET_Switch_State(i, OFF);		// 그룹등이 있으면 일반 등 스위치 상태 클리어
+				}
+				break;
+			case mapping_ITEM_ELECTRICITY_1:		// 전열 1 (릴레이 제어)
+			case mapping_ITEM_ELECTRICITY_2:		// 전열 2 (릴레이 제어)
+				if(flag & 0x02)			// 전체전열이 켜져 있으면
+				{
+					SET_Switch_State(i, OFF);		// 전체등이 있으면 일반 등 스위치 상태 클리어
+				}
+				break;
+				
+			//case mapping_ITEM_3WAY_1:				// 3로 1 (릴레이 제어)
+			//case mapping_ITEM_3WAY_2:				// 3로 2 (릴레이 제어)
+			case mapping_ITEM_LIGHT_ALL:			// 전등 ALL 스위치
+			case mapping_ITEM_ELECTRICITY_ALL:		// 전열 ALL 스위치
+			case mapping_ITEM_LIGHT_GROUP:			// 전등 GROUP 스위치
+			//case mapping_ITEM_GAS:					// 가스차단
+			//case mapping_ITEM_ELEVATOR:
+			case mapping_ITEM_BATCH_LIGHT_OFF:
+				
+				break;
+			default:
+				SET_Switch_State(i, OFF);			// 일반 스위치 상태는 클리어
+				break;
+		}
+	}
+	/*
+	printf("\n\n");
+	for(i=mapping_SWITCH_1;i<mapping_SWITCH_MAX;i++)
+	{
+		if(GET_Switch_State(i))	printf("%d\n", (uint16_t)i);
+	}
+	printf("\n\n");
+	*/
+}
+
+void Control_Recovery(void)
+{
+	uint8_t i, item;
+	
+	// 전체, 그룹이 꺼져 있으면 개별등, 개별전열을 복구하고,	전체, 그룹이 켜져 있으면 전체, 그룹 복구
+	for(i=mapping_SWITCH_1;i<mapping_SWITCH_MAX;i++)
+	{
+		item = tsn2item(i);
+		if(GET_Switch_State(i) != 0)
+		{
+			switch(item)
+			{
+				case mapping_ITEM_LIGHT_1:				// 전등 1 (릴레이 제어)
+				case mapping_ITEM_LIGHT_2:				// 전등 2 (릴레이 제어)
+				case mapping_ITEM_LIGHT_3:				// 전등 3 (릴레이 제어)
+				case mapping_ITEM_LIGHT_4:				// 전등 4 (릴레이 제어)
+				case mapping_ITEM_LIGHT_5:				// 전등 5 (릴레이 제어)
+				case mapping_ITEM_LIGHT_6:				// 전등 6 (릴레이 제어)
+				case mapping_ITEM_ELECTRICITY_1:		// 전열 1 (릴레이 제어)
+				case mapping_ITEM_ELECTRICITY_2:		// 전열 2 (릴레이 제어)
+				case mapping_ITEM_3WAY_1:				// 3로 1 (릴레이 제어)
+				case mapping_ITEM_3WAY_2:				// 3로 2 (릴레이 제어)
+				case mapping_ITEM_DIMMING_LIGHT_1:		// 디밍1 스위치(PWM 제어)
+				case mapping_ITEM_DIMMING_LIGHT_2:		// 디밍2 스위치(PWM 제어)
+				case mapping_ITEM_BATCH_LIGHT_OFF:
+					
+				case mapping_ITEM_LIGHT_ALL:			// 전등 ALL 스위치
+				case mapping_ITEM_ELECTRICITY_ALL:		// 전열 ALL 스위치
+				case mapping_ITEM_LIGHT_GROUP:			// 전등 GROUP 스위치
+					EventCtrl(i, ON);				// 저장된 데이터로 복구
+					break;
+			}
+		}
+		else
+		{
+			switch(item)
+			{
+				case mapping_ITEM_LIGHT_1:				// 전등 1 (릴레이 제어)
+				case mapping_ITEM_LIGHT_2:				// 전등 2 (릴레이 제어)
+				case mapping_ITEM_LIGHT_3:				// 전등 3 (릴레이 제어)
+				case mapping_ITEM_LIGHT_4:				// 전등 4 (릴레이 제어)
+				case mapping_ITEM_LIGHT_5:				// 전등 5 (릴레이 제어)
+				case mapping_ITEM_LIGHT_6:				// 전등 6 (릴레이 제어)
+				case mapping_ITEM_3WAY_1:				// 3로 1 (릴레이 제어)
+				case mapping_ITEM_3WAY_2:				// 3로 2 (릴레이 제어)
+				case mapping_ITEM_ELECTRICITY_1:		// 전열 1 (릴레이 제어)
+				case mapping_ITEM_ELECTRICITY_2:		// 전열 2 (릴레이 제어)
+				case mapping_ITEM_BATCH_LIGHT_OFF:
+					SET_LED_State(i, OFF);
+					SET_SWITCH_Delay_OFF_Tmr(item, 0);	// 복구할 때에는 즉시
+					break;
+				case mapping_ITEM_GAS:					// 가스차단
+				case mapping_ITEM_ELEVATOR:				// 엘리베이터 호츨은 복구에서 제외(아파트 전체가 정전 후 복구되었을 때 모든 세대가 호출...)
+					SET_LED_State(i, ON);
+					break;
+			}
+		}
+	}
+}
