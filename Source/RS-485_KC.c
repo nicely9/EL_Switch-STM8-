@@ -2321,10 +2321,7 @@ void KOCOM_Data_Process(KOCOM_BUF	*pRx)
 					{
 						if((pRx->buf[KOCOM_F_CC] & KOCOM_CC_REQ) == KOCOM_CC_REQ)
 						{
-							if(item2tsn(mapping_ITEM_GAS_n_COOK))
-							{
-								Gu8_Gas_State = OPEN;
-							}
+							Gu8_Gas_State = OPEN;
 							BATCH_BLOCK_Control(SET__GAS_OPEN_STATE);	//월패드에서 가스차단해제 오면 즉시 차단해제 상태가 되고, 스위치에서는 가스 차단해제 불가능.
 						}
 						TxBuf.Result_SEND_Flag			= 0;
@@ -2384,10 +2381,7 @@ void KOCOM_Data_Process(KOCOM_BUF	*pRx)
 					{
 						if((pRx->buf[KOCOM_F_CC] & KOCOM_CC_REQ) == KOCOM_CC_REQ)
 						{
-							if(item2tsn(mapping_ITEM_GAS_n_COOK))
-							{
-								Gu8_Cook_State = OPEN;
-							}
+							Gu8_Cook_State = OPEN;
 							BATCH_BLOCK_Control(SET__GAS_OPEN_STATE);	//월패드에서 가스차단해제 오면 즉시 차단해제 상태가 되고, 스위치에서는 가스 차단해제 불가능.
 						}
 						TxBuf.Result_SEND_Flag			= 0;
@@ -2751,10 +2745,6 @@ void BATCH_BLOCK_Control(uint8_t control)
 					Gu8_Gas_State = CLOSE;
 					Beep(ON);
 					if(G_Trace)	printf("CMD : CLOSE, State : !CLOSE -> CLOSE\r\n");
-				}
-				else
-				{
-					if(G_Trace)	printf("Gas/Cook Close\r\n");
 				}
 			}
 			else if(item2tsn(mapping_ITEM_BATCH_LIGHT_n_COOK))
